@@ -9,8 +9,18 @@ meta.get("/branches", async (c) => {
 });
 
 meta.get("/subjects", async (c) => {
-  const data = await prisma.subject.findMany({ orderBy: { name: "asc" } });
-  return c.json(data);
+  const includeInactive = c.req.query("includeInactive") === "1";
+  const data = await prisma.subject.findMany({
+    orderBy: [{ isActive: "desc" }, { name: "asc" }],
+  });
+  return c.json(
+    data.map((s) => ({
+      id: s.id,
+      code: s.code,
+      name: s.name,
+      isActive: s.isActive,
+    }))
+  );
 });
 
 meta.get("/courses", async (c) => {
