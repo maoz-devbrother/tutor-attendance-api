@@ -5,6 +5,7 @@ import { meta } from "./routes/meta"; // GET branches/subjects/courses
 import { students } from "./routes/students"; // มี basePath("/students")
 import { courses } from "./routes/courses"; // มี basePath("/courses")
 import { subjects } from "./routes/subjects"; // มี basePath("/subjects")
+import { branches } from "./routes/branches";
 
 export const app = new Hono();
 
@@ -28,5 +29,6 @@ app.route("/api", meta);
 app.route("/api", students);
 app.route("/api", courses); // POST /api/courses
 app.route("/api", subjects); // POST /api/subjects
+app.route("/api", branches);
 
 app.notFound((c) => c.json({ error: "Not Found" }, 404));
