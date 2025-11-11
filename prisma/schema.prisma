@@ -14,8 +14,9 @@ model Branch {
 
   isActive Boolean @default(true)
 
-  courses  CourseBranch[]
-  sessions Session[]
+  courses     CourseBranch[]
+  sessions    Session[]
+  enrollments Enrollment[]
 }
 
 model Subject {
@@ -51,10 +52,12 @@ model CourseBranch {
 }
 
 model Student {
-  id          String       @id @default(cuid())
-  code        String       @unique
-  fullName    String
-  phone       String?
+  id       String  @id @default(cuid())
+  code     String  @unique
+  fullName String
+  phone    String?
+  isActive Boolean @default(true)
+
   enrollments Enrollment[]
   attendance  Attendance[]
 
@@ -63,17 +66,20 @@ model Student {
 }
 
 model Enrollment {
-  id                String @id @default(cuid())
+  id                String  @id @default(cuid())
   studentId         String
   courseId          String
+  branchId          String
   sessionsPurchased Int
-  sessionsAttended  Int    @default(0)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  sessionsAttended  Int     @default(0)
+  status            String? // optional
 
   student Student @relation(fields: [studentId], references: [id])
   course  Course  @relation(fields: [courseId], references: [id])
+  branch  Branch  @relation(fields: [branchId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([studentId, courseId])
 }
