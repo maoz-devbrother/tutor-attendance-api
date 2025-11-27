@@ -123,3 +123,14 @@ model Attendance {
 
   @@unique([sessionId, studentId])
 }
+
+model Teacher {
+  id       String  @id @default(cuid())
+  code     String  @unique
+  fullName String
+  phone    String?
+  isActive Boolean @default(true)
+
+  // อนาคต: จะมาผูกกับ Session
+  // sessions Session[]
+}

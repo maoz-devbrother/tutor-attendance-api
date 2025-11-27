@@ -9,6 +9,8 @@ import { subjects } from "./routes/subjects";
 import { branches } from "./routes/branches";
 import { enrollments } from "./routes/enrollments";
 import { reports } from "./routes/reports";
+import { stats } from "./routes/stats";
+import { teachers } from "./routes/teachers";
 
 export const app = new Hono();
 
@@ -57,6 +59,8 @@ app.route("/api", branches);
 app.route("/api", enrollments);
 app.route("/api", sessions);
 app.route("/api", reports);
+app.route("/api", stats);
+app.route("/api", teachers);
 
 app.notFound((c) => c.json({ error: "Not Found" }, 404));
 
