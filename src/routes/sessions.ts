@@ -29,87 +29,45 @@ sessions.get("/", async (c) => {
     include: {
       course: { include: { subject: true } },
       branch: true,
+      records: true, // ✅ ดึง Attendance ของคาบนี้มาด้วย
     },
     orderBy: { startAt: "asc" },
   });
 
-  const items = rows.map((s) => ({
-    id: s.id,
-    startAt: s.startAt.toISOString(),
-    endAt: s.endAt.toISOString(),
-    teacher: s.teacher,
-    courseTitle: s.course.title,
-    subjectName: s.course.subject.name,
-    branchName: s.branch.name,
-  }));
+  const items = rows.map((s) => {
+    // ✅ นับสถานะการเช็คชื่อ
+    let present = 0;
+    let absent = 0;
+    let leave = 0;
+
+    for (const r of s.records) {
+      if (r.status === "PRESENT") present += 1;
+      else if (r.status === "ABSENT") absent += 1;
+      else if (r.status === "LEAVE") leave += 1;
+    }
+
+    const totalRecords = present + absent + leave;
+    const hasAttendance = totalRecords > 0;
+
+    return {
+      id: s.id,
+      startAt: s.startAt.toISOString(),
+      endAt: s.endAt.toISOString(),
+      teacher: s.teacher,
+      courseTitle: s.course.title,
+      subjectName: s.course.subject.name,
+      branchName: s.branch.name,
+
+      // ✅ ฟิลด์ใหม่สำหรับหน้าเช็คชื่อ
+      hasAttendance,
+      presentCount: present,
+      absentCount: absent,
+      leaveCount: leave,
+      totalRecords,
+    };
+  });
 
   return c.json(items);
-});
-
-/** -------------------------
- *  POST /api/sessions
- *  ------------------------- */
-const CreateSessionSchema = z.object({
-  courseId: z.string().min(1),
-  branchId: z.string().min(1),
-  startAt: z.string().datetime(), // ISO
-  endAt: z.string().datetime(),
-  teacher: z.string().min(1).optional().nullable(),
-});
-
-sessions.post("/", async (c) => {
-  const body = await c.req.json().catch(() => ({}));
-  const parsed = CreateSessionSchema.safeParse(body);
-  if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
-
-  const { courseId, branchId, startAt, endAt, teacher } = parsed.data;
-
-  // ตรวจว่าคอร์สเปิดสอนสาขานี้
-  const course = await prisma.course.findUnique({
-    where: { id: courseId },
-    include: { branches: { select: { branchId: true } } },
-  });
-  if (!course) return c.json({ error: { message: "ไม่พบคอร์ส" } }, 404);
-
-  const allowed = new Set(course.branches.map((b) => b.branchId));
-  if (!allowed.has(branchId)) {
-    return c.json(
-      {
-        error: {
-          code: "BRANCH_NOT_ALLOWED",
-          message: "คอร์สนี้ไม่ได้เปิดที่สาขานี้",
-        },
-      },
-      409
-    );
-  }
-
-  const created = await prisma.session.create({
-    data: {
-      courseId,
-      branchId,
-      startAt: new Date(startAt),
-      endAt: new Date(endAt),
-      teacher: teacher ?? null,
-    },
-    include: {
-      course: { include: { subject: true } },
-      branch: true,
-    },
-  });
-
-  return c.json(
-    {
-      id: created.id,
-      startAt: created.startAt,
-      endAt: created.endAt,
-      teacher: created.teacher,
-      courseTitle: created.course.title,
-      subjectName: created.course.subject.name,
-      branchName: created.branch.name,
-    },
-    201
-  );
 });
 
 /** -------------------------
@@ -202,4 +160,76 @@ sessions.post("/:id/attendance", async (c) => {
   ]);
 
   return c.json({ ok: true });
+});
+
+/** -------------------------
+ *  GET /api/sessions/range?from=YYYY-MM-DD&to=YYYY-MM-DD&branchId=
+ *  ใช้สำหรับดูคาบเรียนหลายวัน
+ *  ------------------------- */
+sessions.get("/range", async (c) => {
+  const fromQ = c.req.query("from");
+  const toQ = c.req.query("to");
+  const branchId = c.req.query("branchId") ?? "";
+
+  // default: 7 วันนับจากวันนี้
+  const today = new Date();
+  const todayStr = today.toISOString().slice(0, 10); // yyyy-mm-dd
+
+  const defaultFromDate = new Date(today);
+  defaultFromDate.setDate(defaultFromDate.getDate() - 3); // ย้อนหลัง 3 วัน
+  const defaultToDate = new Date(today);
+  defaultToDate.setDate(defaultToDate.getDate() + 3); // ล่วงหน้า 3 วัน
+
+  const fromStr = fromQ ?? defaultFromDate.toISOString().slice(0, 10);
+  const toStr = toQ ?? defaultToDate.toISOString().slice(0, 10);
+
+  const { start } = bangkokDayRange(fromStr);
+  const { end } = bangkokDayRange(toStr);
+
+  const rows = await prisma.session.findMany({
+    where: {
+      startAt: { gte: start, lte: end },
+      ...(branchId ? { branchId } : {}),
+    },
+    include: {
+      course: { include: { subject: true } },
+      branch: true,
+      records: true, // เพื่อดูว่าเช็คชื่อแล้วหรือยัง
+    },
+    orderBy: [{ startAt: "asc" }],
+  });
+
+  const items = rows.map((s) => {
+    let present = 0;
+    let absent = 0;
+    let leave = 0;
+
+    for (const r of s.records) {
+      if (r.status === "PRESENT") present += 1;
+      else if (r.status === "ABSENT") absent += 1;
+      else if (r.status === "LEAVE") leave += 1;
+    }
+
+    const totalRecords = present + absent + leave;
+    const hasAttendance = totalRecords > 0;
+
+    return {
+      id: s.id,
+      startAt: s.startAt.toISOString(),
+      endAt: s.endAt.toISOString(),
+      teacher: s.teacher,
+      courseTitle: s.course.title,
+      subjectName: s.course.subject.name,
+      branchName: s.branch.name,
+      branchId: s.branchId,
+
+      hasAttendance,
+      presentCount: present,
+      absentCount: absent,
+      leaveCount: leave,
+      totalRecords,
+    };
+  });
+
+  return c.json(items);
 });

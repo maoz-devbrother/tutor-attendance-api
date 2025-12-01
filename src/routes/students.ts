@@ -7,6 +7,7 @@ const CreateStudentSchema = z.object({
   code: z.string().min(1).max(50),
   fullName: z.string().min(1).max(200),
   phone: z.string().min(3).max(30).optional().nullable(),
+  isActive: z.boolean().optional(),
 });
 
 const UpdateStudentSchema = z.object({
@@ -22,22 +23,31 @@ export const students = new Hono().basePath("/students");
 // GET /api/students?q=&page=&pageSize=
 students.get("/", async (c) => {
   const q = c.req.query("q")?.trim() ?? "";
-  const page = Number(c.req.query("page") ?? "1");
+  const status = c.req.query("status") ?? "active"; // active | inactive | all
+
+  const page = Math.max(1, Number(c.req.query("page") ?? "1"));
   const pageSize = Math.min(
     50,
     Math.max(1, Number(c.req.query("pageSize") ?? "10"))
   );
 
-  const where: Prisma.StudentWhereInput = q
-    ? {
-        OR: [
-          { code: { contains: q, mode: "insensitive" as Prisma.QueryMode } },
-          {
-            fullName: { contains: q, mode: "insensitive" as Prisma.QueryMode },
-          },
-        ],
-      }
-    : {};
+  const where: Prisma.StudentWhereInput = {};
+
+  // filter สถานะ
+  if (status === "active") {
+    where.isActive = true;
+  } else if (status === "inactive") {
+    where.isActive = false;
+  }
+
+  // filter ค้นหา (code, name, phone)
+  if (q) {
+    where.OR = [
+      { code: { contains: q, mode: "insensitive" } },
+      { fullName: { contains: q, mode: "insensitive" } },
+      { phone: { contains: q, mode: "insensitive" } },
+    ];
+  }
 
   const [total, items] = await Promise.all([
     prisma.student.count({ where }),
@@ -46,11 +56,26 @@ students.get("/", async (c) => {
       orderBy: { code: "asc" },
       skip: (page - 1) * pageSize,
       take: pageSize,
-      select: { id: true, code: true, fullName: true, phone: true },
+      select: {
+        id: true,
+        code: true,
+        fullName: true,
+        phone: true,
+        isActive: true,
+        createdAt: true,
+      },
     }),
   ]);
 
-  return c.json({ items, total, page, pageSize });
+  return c.json({
+    items: items.map((s) => ({
+      ...s,
+      createdAt: s.createdAt.toISOString(),
+    })),
+    total,
+    page,
+    pageSize,
+  });
 });
 
 // GET /api/students/:id
@@ -126,24 +151,142 @@ students.get("/:id/attendance", async (c) => {
   return c.json(items);
 });
 
+students.get("/:id/summary", async (c) => {
+  const id = c.req.param("id");
+
+  const student = await prisma.student.findUnique({
+    where: { id },
+  });
+
+  if (!student) {
+    return c.json({ error: "Student not found" }, 404);
+  }
+
+  const enrollments = await prisma.enrollment.findMany({
+    where: { studentId: id },
+    include: {
+      course: { include: { subject: true } },
+      branch: true,
+    },
+    orderBy: [{ createdAt: "desc" }, { course: { title: "asc" } }],
+  });
+
+  const rows = enrollments.map((e) => {
+    const sessionsPurchased = e.sessionsPurchased;
+    const sessionsAttended = e.sessionsAttended;
+    const remaining = Math.max(sessionsPurchased - sessionsAttended, 0);
+
+    let status: "COMPLETE" | "IN_PROGRESS" | "OVER";
+    if (sessionsAttended > sessionsPurchased) status = "OVER";
+    else if (sessionsAttended === sessionsPurchased) status = "COMPLETE";
+    else status = "IN_PROGRESS";
+
+    const progressPercent =
+      sessionsPurchased > 0
+        ? Math.round((sessionsAttended / sessionsPurchased) * 100)
+        : 0;
+
+    return {
+      enrollmentId: e.id,
+      courseId: e.courseId,
+      courseTitle: e.course.title,
+      subjectName: e.course.subject.name,
+      branchId: e.branchId,
+      branchName: e.branch.name,
+      sessionsPurchased,
+      sessionsAttended,
+      remaining,
+      progressPercent,
+      status,
+      createdAt: e.createdAt.toISOString(),
+    };
+  });
+
+  // สรุปรวม
+  const totalEnrollments = rows.length;
+  const totalSessionsPurchased = rows.reduce(
+    (sum, r) => sum + r.sessionsPurchased,
+    0
+  );
+  const totalSessionsAttended = rows.reduce(
+    (sum, r) => sum + r.sessionsAttended,
+    0
+  );
+
+  const summary = {
+    totalEnrollments,
+    totalSessionsPurchased,
+    totalSessionsAttended,
+  };
+
+  return c.json({
+    student: {
+      id: student.id,
+      code: student.code,
+      fullName: student.fullName,
+      phone: student.phone,
+      isActive: student.isActive,
+      createdAt: student.createdAt.toISOString(),
+    },
+    enrollments: rows,
+    summary,
+  });
+});
+
 students.post("/", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const parsed = CreateStudentSchema.safeParse(body);
-  if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
-
-  const dup = await prisma.student.findUnique({
-    where: { code: parsed.data.code },
-  });
-  if (dup)
+  if (!parsed.success) {
     return c.json(
       {
-        error: { code: "DUPLICATE_CODE", message: "รหัสนักเรียนนี้ถูกใช้แล้ว" },
+        error: {
+          type: "VALIDATION_ERROR",
+          details: parsed.error.flatten(),
+        },
+      },
+      400
+    );
+  }
+
+  const { code, fullName, phone, isActive } = parsed.data;
+
+  // เช็ครหัสซ้ำ
+  const exists = await prisma.student.findUnique({
+    where: { code },
+    select: { id: true },
+  });
+  if (exists) {
+    return c.json(
+      {
+        error: {
+          type: "DUPLICATE_CODE",
+          message: "มีรหัสนักเรียนนี้ในระบบแล้ว",
+        },
       },
       409
     );
+  }
 
-  const created = await prisma.student.create({ data: parsed.data });
-  return c.json(created, 201);
+  const created = await prisma.student.create({
+    data: {
+      code,
+      fullName,
+      phone: phone ?? null,
+      isActive: isActive ?? true,
+    },
+  });
+
+  return c.json(
+    {
+      id: created.id,
+      code: created.code,
+      fullName: created.fullName,
+      phone: created.phone,
+      isActive: created.isActive,
+      createdAt: created.createdAt.toISOString(),
+    },
+    201
+  );
 });
 
 students.patch("/:id", async (c) => {
@@ -210,4 +353,42 @@ students.patch("/:id/active", async (c) => {
 
   if (!updated) return c.json({ error: { message: "ไม่พบนักเรียน" } }, 404);
   return c.json(updated);
+});
+
+students.put("/:id", async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = CreateStudentSchema.partial().safeParse(body);
+  // partial = ไม่บังคับทุก field
+
+  if (!parsed.success) {
+    return c.json({ error: parsed.error.flatten() }, 400);
+  }
+
+  const data = parsed.data;
+
+  const existing = await prisma.student.findUnique({ where: { id } });
+  if (!existing) {
+    return c.json({ error: { message: "ไม่พบนักเรียน" } }, 404);
+  }
+
+  const updated = await prisma.student.update({
+    where: { id },
+    data: {
+      code: data.code ?? existing.code,
+      fullName: data.fullName ?? existing.fullName,
+      phone: data.phone !== undefined ? data.phone : existing.phone, // แยก undefined กับ null
+      isActive: data.isActive !== undefined ? data.isActive : existing.isActive,
+    },
+  });
+
+  return c.json({
+    id: updated.id,
+    code: updated.code,
+    fullName: updated.fullName,
+    phone: updated.phone,
+    isActive: updated.isActive,
+    createdAt: updated.createdAt.toISOString(),
+    updatedAt: updated.updatedAt.toISOString(),
+  });
 });
